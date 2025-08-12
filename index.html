@@ -17,49 +17,148 @@
 
 <div id="map"></div>
 
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<!-- Replace your existing script with this block -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
 <script>
-  // Initialize map
-  var map = L.map('map').setView([20.5937, 78.9629], 5); // Default: India view
+/* ========== Map init ========== */
+const map = L.map('map').setView([20.6, 78.9], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
 
-  // Add tile layer
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors'
-  }).addTo(map);
+/* ========== Globals ========== */
+let soilSites = null;      // GeoJSON object
+let soilLayer = null;      // Leaflet layer for soil points
+let userMarker = null;
+let userLine = null;
 
-  // Auto locate user
-  map.locate({ setView: true, maxZoom: 14 });
+/* UI refs */
+const statusEl = document.getElementById('status');
+const locateBtn = document.getElementById('locateBtn');
+const nearbyList = document.getElementById('nearby');
 
-  function onLocationFound(e) {
-    L.marker(e.latlng).addTo(map)
-      .bindPopup("You are here").openPopup();
+/* Load soil GeoJSON first */
+fetch('data/soil_sites.geojson')
+  .then(r => r.json())
+  .then(data => {
+    soilSites = data;
+    soilLayer = L.geoJSON(soilSites, {
+      pointToLayer: (f, latlng) => L.marker(latlng, {icon: L.icon({iconUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png', iconSize:[25,41]})}),
+      onEachFeature: (f, layer) => {
+        const p = f.properties || {};
+        layer.bindPopup(`<b>${p.name || 'Site'}</b><br>Clay: ${p.clay || 'Unknown'}<br>Source: ${p.source || 'Unknown'}`);
+      }
+    }).addTo(map);
+    statusEl.textContent = 'Soil data loaded.';
+    // Optionally auto-locate once data is ready:
+    // tryAutoLocateIfReady();
+  })
+  .catch(err => {
+    console.error('Failed to load soil_sites.geojson:', err);
+    statusEl.textContent = 'Failed to load soil data.';
+  });
+
+/* ========== Geolocation handling ========== */
+locateBtn.addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    statusEl.textContent = 'Geolocation not supported by browser.';
+    return;
   }
-  function onLocationError(e) {
-    alert(e.message);
-  }
-  map.on('locationfound', onLocationFound);
-  map.on('locationerror', onLocationError);
+  statusEl.textContent = 'Detecting location…';
+  navigator.geolocation.getCurrentPosition(onLocationSuccess, onLocationError, { enableHighAccuracy:true, timeout:15000 });
+});
 
-  // Load soil data
-  fetch('data/soil_sites.geojson')
-    .then(response => response.json())
-    .then(data => {
-      L.geoJSON(data, {
-        onEachFeature: function (feature, layer) {
-          if (feature.properties && feature.properties.name) {
-            layer.bindPopup(
-              `<b>${feature.properties.name}</b><br>` +
-              `Soil Type: ${feature.properties.soil_type}<br>` +
-              `Verified: ${feature.properties.verified}`
-            );
-          }
+function onLocationSuccess(pos) {
+  const lat = pos.coords.latitude;
+  const lng = pos.coords.longitude;
+  statusEl.textContent = `Detected: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  if (userMarker) map.removeLayer(userMarker);
+  userMarker = L.marker([lat,lng], {title:'You'}).addTo(map).bindPopup('You are here').openPopup();
+  map.setView([lat,lng], 13);
+
+  if (!soilSites) {
+    statusEl.textContent += ' — soil data not yet loaded. Try again in a moment.';
+    return;
+  }
+  showNearestSites([lng, lat], 5); // show top 5 nearest
+}
+
+function onLocationError(err) {
+  statusEl.textContent = 'Location error: ' + err.message;
+}
+
+/* ========== Compute and display nearest sites ========== */
+function showNearestSites(userLngLat, topN = 5) {
+  // userLngLat is [lng, lat] to match GeoJSON order
+  const userPt = turf.point(userLngLat);
+
+  // Map features -> compute distance (km)
+  const results = soilSites.features.map(feature => {
+    // turf.distance accepts two features; ensure a point is used
+    const fpt = (feature.geometry.type === 'Point') ? feature : turf.centroid(feature);
+    const distKm = turf.distance(userPt, fpt, {units: 'kilometers'});
+    return { feature, distKm };
+  });
+
+  // sort and pick topN
+  results.sort((a,b) => a.distKm - b.distKm);
+  const nearest = results.slice(0, topN);
+
+  // Clear previous UI & lines
+  nearbyList.innerHTML = '';
+  if (userLine) { map.removeLayer(userLine); userLine = null; }
+
+  nearest.forEach((r, idx) => {
+    const f = r.feature;
+    const props = f.properties || {};
+    const coords = (f.geometry.type === 'Point') ? f.geometry.coordinates : turf.centroid(f).geometry.coordinates;
+    const lat = coords[1], lng = coords[0];
+
+    // Create list item
+    const li = document.createElement('li');
+    li.style.padding = '6px 0';
+    li.innerHTML = `<strong>${props.name || ('Site ' + (idx+1))}</strong>
+                    — ${r.distKm.toFixed(2)} km
+                    <br> Clay: ${props.clay || 'Unknown'} (Source: ${props.source || 'Unknown'})
+                    <br><button class="showBtn">Show on map</button>`;
+
+    // Show on map button
+    li.querySelector('.showBtn').addEventListener('click', () => {
+      map.setView([lat, lng], 15);
+      // open popup for that feature's marker (search in soilLayer)
+      soilLayer.eachLayer(layer => {
+        const ll = layer.getLatLng();
+        if (Math.abs(ll.lat - lat) < 1e-6 && Math.abs(ll.lng - lng) < 1e-6) {
+          layer.openPopup();
         }
-      }).addTo(map);
-    })
-    .catch(err => console.error('Error loading soil data:', err));
+      });
+    });
+
+    nearbyList.appendChild(li);
+  });
+
+  // Draw a line to the very nearest (if exists)
+  if (nearest.length > 0) {
+    const firstCoords = nearest[0].feature.geometry.type === 'Point'
+      ? nearest[0].feature.geometry.coordinates
+      : turf.centroid(nearest[0].feature).geometry.coordinates;
+    const latlngs = [[userLngLat[1], userLngLat[0]], [firstCoords[1], firstCoords[0]]];
+    userLine = L.polyline(latlngs, { color: 'blue', weight: 3 }).addTo(map);
+  }
+}
+
+/* ========== Optional: auto-locate once soil data & map ready ==========
+function tryAutoLocateIfReady() {
+  if (soilSites && navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(onLocationSuccess, ()=>{}, { enableHighAccuracy:true });
+  }
+}
+================================= */
 </script>
+
 
 </body>
 </html>
+
