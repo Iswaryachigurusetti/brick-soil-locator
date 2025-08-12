@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Village A",
+        "soil_type": "Clay Loam",
+        "verified": "Yes"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [78.4867, 17.3850]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Village B",
+        "soil_type": "Alluvial",
+        "verified": "No"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [77.5946, 12.9716]
+      }
+    }
+  ]
+}
